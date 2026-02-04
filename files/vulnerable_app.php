@@ -1,10 +1,4 @@
 <?php
-    /**
-     * CUSTOM VULNERABLE APP FOR RIT CYBERRANGE LAB
-     * This script is intentionally vulnerable to Command Injection.
-     * Use with caution.
-     */
-
     echo "<h1>System Diagnostics Dashboard</h1>";
     echo "<p>Enter a hostname or IP to check connectivity:</p>";
 
@@ -14,7 +8,7 @@
         
         echo "<h3>Ping Results for: " . htmlspecialchars($target) . "</h3>";
         echo "<pre>";
-        // POSIX-style command injection vulnerability
+        // command injection vulnerability
         echo shell_exec("ping -c 4 " . $target);
         echo "</pre>";
     } else {

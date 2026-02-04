@@ -46,7 +46,7 @@
 
     - name: Deploy wp-config.php from template
       template:
-        src: templates/config.j2
+        src: templates/wp-config.j2
         dest: "{{ wp_install_dir }}/wp-config.php"
         owner: "{{ web_user }}"
         group: "{{ web_group }}"
