@@ -37,10 +37,6 @@ ansible --version
 [webservers]
 ansible-vuln-server ansible_host=100.65.5.125 ansible_user=user
 </pre>
-### Install Nmap on ansible-vuln-deploy to check network connectivity later:
-<pre>
-sudo apt update && sudo apt install -y nmap
-</pre>
 
 ### Set up SSH Trust to automate the server without stopping to ask for a password for every task:
 <pre>
@@ -69,13 +65,6 @@ ssh cyberrange@[ANSIBLE-VULN-SERVER-IP] "systemctl status apache2 && systemctl s
 
 ### Database Running:
 ![alt text](image-3.png)
-
-## Network Connectivity Test
-### Check for open target port:
-<pre>
-sudo nmap -p 80 [ANSIBLE-VULN-SERVER-IP] 
-</pre>
-![alt text](image-5.png)
 
 ## Vulnerable File Check
 ### Check to ensure the vulnerable file has been deployed on the target machine:
