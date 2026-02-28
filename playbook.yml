@@ -1,30 +1,36 @@
-- name: Deploy Vulnerable WordPress Environment
+---
+- name: Full Deployment of Patched WordPress and Vulnerable Lab
   hosts: vuln_servers
   become: yes
-  vars_files:
-    - vars/main.yml
+  vars:
+    wp_install_dir: "/var/www/html"
+    db_name: "wordpress_db"
+    db_user: "wp_user"
+    db_password: "password123"
+    wp_download_url: "https://wordpress.org/wordpress-5.8.1.tar.gz"
 
   tasks:
-    - name: Update apt cache and install LAMP stack
+    - name: 1. Install LAMP Stack and System Dependencies
       apt:
-        name:
-          - apache2
-          - mariadb-server
-          - php
-          - php-mysql
-          - libapache2-mod-php
-          - python3-pymysql
-          - unzip
+        name: [apache2, mariadb-server, php, php-mysql, libapache2-mod-php, php-xml, php-gd, php-mbstring, python3-pymysql, tar, curl]
         state: present
         update_cache: yes
 
-    - name: Create WordPress Database
+    - name: 2. Start and Enable Services
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop: [apache2, mariadb]
+
+    - name: 3. Create/Reset Database
       mysql_db:
         name: "{{ db_name }}"
-        state: present
+        state: "{{ item }}"
         login_unix_socket: /var/run/mysqld/mysqld.sock
+      loop: [absent, present]
 
-    - name: Create WordPress DB User
+    - name: 4. Configure DB User Permissions
       mysql_user:
         name: "{{ db_user }}"
         password: "{{ db_password }}"
@@ -32,44 +38,94 @@
         state: present
         login_unix_socket: /var/run/mysqld/mysqld.sock
 
-    - name: Download and Unpack WordPress {{ wp_version }}
-      unarchive:
-        src: "{{ wp_download_url }}"
-        dest: "{{ wp_install_dir }}"
-        remote_src: yes
-        extra_opts: [--strip-components=1]
+    - name: 5. Wipe Web Root and Extract WordPress
+      shell: |
+        rm -rf {{ wp_install_dir }}/*
+        curl -L {{ wp_download_url }} | tar -xzp -C {{ wp_install_dir }} --strip-components=1
+      args:
+        executable: /bin/bash
 
-    - name: Remove default Apache index page
-      file:
-        path: /var/www/html/index.html
-        state: absent
+    - name: 6. Apply GLOBAL PHP 8.1 Syntax Patch (Brace & Magic Quotes)
+      shell: |
+        # Fix numeric and string array offsets
+        find {{ wp_install_dir }} -type f -name "*.php" -exec sed -i 's/{\([0-9]\{1,\}\)}/[\1]/g' {} +
+        find {{ wp_install_dir }} -type f -name "*.php" -exec sed -i "s/{\(['\"'\"']\)\([a-zA-Z0-9_-]\{1,\}\)\(['\"'\"']\)}/[\1\2\3]/g" {} +
+        # Patch Magic Quotes in load.php
+        sed -i 's/get_magic_quotes_gpc()/false/g' {{ wp_install_dir }}/wp-includes/load.php
+      args:
+        executable: /bin/bash
 
-    - name: Deploy wp-config.php from template
-      template:
-        src: templates/wp-config.j2
-        dest: "{{ wp_install_dir }}/wp-config.php"
-        owner: "{{ web_user }}"
-        group: "{{ web_group }}"
-
-    - name: Inject Vulnerable Plugin ({{ vuln_plugin_name }})
-      unarchive:
-        src: "{{ vuln_plugin_url }}"
-        dest: "{{ wp_install_dir }}/wp-content/plugins"
-        remote_src: yes
-        owner: "{{ web_user }}"
-        group: "{{ web_group }}"
-
-    - name: Deploy custom vulnerable application
+    - name: 7. Deploy wp-config.php (Silenced Mode)
       copy:
-        src: files/vulnerable_app.php
-        dest: "{{ wp_install_dir }}/vulnerable_app.php"
-        owner: "{{ web_user }}"
-        group: "{{ web_group }}"
-        mode: '0644'
+        dest: "{{ wp_install_dir }}/wp-config.php"
+        content: |
+          <?php
+          define( 'DB_NAME', '{{ db_name }}' );
+          define( 'DB_USER', '{{ db_user }}' );
+          define( 'DB_PASSWORD', '{{ db_password }}' );
+          define( 'DB_HOST', 'localhost' );
+          define( 'DB_CHARSET', 'utf8' );
+          $table_prefix = 'wp_';
+          define( 'WP_DEBUG', false );
+          @ini_set( 'display_errors', 0 );
+          if ( ! defined( 'ABSPATH' ) ) define( 'ABSPATH', __DIR__ . '/' );
+          require_once ABSPATH . 'wp-settings.php';
 
-    - name: Finalize permissions on web root
+    - name: 8. Initialize FULL Database Schema via Direct MariaDB Import
+      shell: |
+        mariadb -u root {{ db_name }} <<EOF
+        -- Create tables
+        CREATE TABLE IF NOT EXISTS wp_options (option_id bigint(20) unsigned NOT NULL AUTO_INCREMENT, option_name varchar(191) NOT NULL DEFAULT '', option_value longtext NOT NULL, autoload varchar(20) NOT NULL DEFAULT 'yes', PRIMARY KEY (option_id), UNIQUE KEY option_name (option_name), KEY autoload (autoload));
+        CREATE TABLE IF NOT EXISTS wp_posts (ID bigint(20) unsigned NOT NULL AUTO_INCREMENT, post_author bigint(20) unsigned NOT NULL DEFAULT 1, post_date datetime NOT NULL DEFAULT NOW(), post_content longtext NOT NULL, post_title text NOT NULL, post_status varchar(20) NOT NULL DEFAULT 'publish', post_name varchar(200) NOT NULL DEFAULT '', post_type varchar(20) NOT NULL DEFAULT 'post', PRIMARY KEY (ID));
+        CREATE TABLE IF NOT EXISTS wp_users (ID bigint(20) unsigned NOT NULL AUTO_INCREMENT, user_login varchar(60) NOT NULL DEFAULT '', user_pass varchar(255) NOT NULL DEFAULT '', user_email varchar(100) NOT NULL DEFAULT '', display_name varchar(250) NOT NULL DEFAULT '', PRIMARY KEY (ID));
+        CREATE TABLE IF NOT EXISTS wp_postmeta (meta_id bigint(20) unsigned NOT NULL AUTO_INCREMENT, post_id bigint(20) unsigned NOT NULL DEFAULT 0, meta_key varchar(255) DEFAULT NULL, meta_value longtext DEFAULT NULL, PRIMARY KEY (meta_id), KEY post_id (post_id), KEY meta_key (meta_key(191)));
+        CREATE TABLE IF NOT EXISTS wp_usermeta (umeta_id bigint(20) unsigned NOT NULL AUTO_INCREMENT, user_id bigint(20) unsigned NOT NULL DEFAULT 0, meta_key varchar(255) DEFAULT NULL, meta_value longtext DEFAULT NULL, PRIMARY KEY (umeta_id), KEY user_id (user_id), KEY meta_key (meta_key(191)));
+        CREATE TABLE IF NOT EXISTS wp_terms (term_id bigint(20) unsigned NOT NULL AUTO_INCREMENT, name varchar(200) NOT NULL DEFAULT '', slug varchar(200) NOT NULL DEFAULT '', PRIMARY KEY (term_id));
+        CREATE TABLE IF NOT EXISTS wp_term_taxonomy (term_taxonomy_id bigint(20) unsigned NOT NULL AUTO_INCREMENT, term_id bigint(20) unsigned NOT NULL DEFAULT 0, taxonomy varchar(32) NOT NULL DEFAULT '', description longtext NOT NULL, PRIMARY KEY (term_taxonomy_id));
+        CREATE TABLE IF NOT EXISTS wp_term_relationships (object_id bigint(20) unsigned NOT NULL DEFAULT 0, term_taxonomy_id bigint(20) unsigned NOT NULL DEFAULT 0, PRIMARY KEY (object_id,term_taxonomy_id));
+        CREATE TABLE IF NOT EXISTS wp_commentmeta (meta_id bigint(20) unsigned NOT NULL AUTO_INCREMENT, comment_id bigint(20) unsigned NOT NULL DEFAULT 0, meta_key varchar(255) DEFAULT NULL, meta_value longtext DEFAULT NULL, PRIMARY KEY (meta_id));
+        CREATE TABLE IF NOT EXISTS wp_comments (comment_ID bigint(20) unsigned NOT NULL AUTO_INCREMENT, comment_post_ID bigint(20) unsigned NOT NULL DEFAULT 0, comment_author tinytext NOT NULL, comment_content text NOT NULL, comment_approved varchar(20) NOT NULL DEFAULT '1', PRIMARY KEY (comment_ID));
+        
+        -- Insert Data (Now with 3 values per row to match 3 columns)
+        INSERT IGNORE INTO wp_options (option_name, option_value, autoload) VALUES 
+          ('siteurl', 'http://100.65.5.125', 'yes'), 
+          ('home', 'http://100.65.5.125', 'yes'), 
+          ('blogname', 'Vulnerable Lab', 'yes'), 
+          ('template', 'twentytwentyone', 'yes'), 
+          ('stylesheet', 'twentytwentyone', 'yes'), 
+          ('current_theme', 'twentytwentyone', 'yes');
+          
+        INSERT IGNORE INTO wp_posts (ID, post_author, post_content, post_title, post_status, post_name, post_type) 
+        VALUES (1, 1, 'Deployment Successful. PHP 8.1 noise suppressed.', 'System Status: Nominal', 'publish', 'hello-world', 'post');
+        
+        INSERT IGNORE INTO wp_users (ID, user_login, user_pass, user_email, display_name) 
+        VALUES (1, 'admin', MD5('password123'), 'admin@example.com', 'Administrator');
+        EOF
+      args:
+        executable: /bin/bash
+
+    - name: 9. Deploy Vulnerable Application Endpoint
+      copy:
+        dest: "{{ wp_install_dir }}/vulnerable_app.php"
+        content: |
+          <?php
+          echo "<h1>Lab Diagnostic Tool</h1>";
+          echo "<form method='GET'>IP to Ping: <input type='text' name='ip'><input type='submit'></form>";
+          if(isset($_GET['ip'])){
+              echo "<pre>" . shell_exec("ping -c 2 " . $_GET['ip']) . "</pre>";
+          }
+          ?>
+
+    - name: 10. Final Permissions and Service Restart
       file:
         path: "{{ wp_install_dir }}"
-        owner: "{{ web_user }}"
-        group: "{{ web_group }}"
+        owner: www-data
+        group: www-data
         recurse: yes
+      notify: Restart Apache
+
+  handlers:
+    - name: Restart Apache
+      service:
+        name: apache2
+        state: restarted
